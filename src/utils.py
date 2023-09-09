@@ -1,6 +1,7 @@
 from PIL import Image
 import os
 from torchvision.transforms import PILToTensor
+import torch
 
 def load_frames(frames_dir):
     """
