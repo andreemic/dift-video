@@ -1,6 +1,7 @@
 # requires path to contain dift/src directory from the original DIFT repo
 from dift_sd import SDFeaturizer
 import torch
+from tqdm import tqdm
 
 # small wrapper around SDFeatureExtractor to split layers/steps config from the extractor function
 class DIFTFeatureExtractor(SDFeaturizer):
@@ -15,10 +16,10 @@ class DIFTFeatureExtractor(SDFeaturizer):
         if layer is None:
             layer = self.layer
         if step is None:
-            steps = self.step
+            step = self.step
 
         results = []
-        for i in range(len(img_tensor)):
-            results.append(super().__call__(img_tensor, prompt, up_ft_index=layer, t=step))
+        for i in tqdm(range(len(img_tensor)), desc='Extracting features from images'):
+            results.append(super(DIFTFeatureExtractor, self).forward(img_tensor[i], prompt, up_ft_index=layer, t=step))
         
         return torch.stack(results)
