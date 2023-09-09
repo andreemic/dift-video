@@ -408,7 +408,7 @@ class SDFeatureExtractor:
 if __name__ == "__main__":
     # sd_id = "runwayml/stable-diffusion-v1-5"
     sd_id = "stabilityai/stable-diffusion-2-1"
-    device = "cuda:7"
+    device = "cuda:0"
     extractor = SDFeatureExtractor(sd_id=sd_id, device=device)
 
     # settings
