@@ -1,5 +1,6 @@
 from PIL import Image
 import os
+from torchvision.transforms import PILToTensor
 
 def load_frames(frames_dir):
     """
@@ -19,3 +20,6 @@ def load_frames(frames_dir):
             frames.append(Image.open(fpath))
             fpaths.append(fpath)
     return frames, fpaths
+
+def pil_to_tensor(img: Image.Image) -> torch.Tensor:
+    return (PILToTensor()(img) / 255.0 - 0.5) * 2

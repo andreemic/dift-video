@@ -422,3 +422,20 @@ if __name__ == "__main__":
         print(f"---- Timestep: {tstep}")
         for layer, ft in layer_fts.items():
             print(f"\tlayer {layer}: {ft.shape}")
+
+
+# small wrapper around SDFeatureExtractor to split layers/steps config from the extractor function
+class FeatureExtractor(SDFeatureExtractor):
+    def __init__(self, device='cuda', sd_id="stabilityai/stable-diffusion-2-1", layers=[0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15], steps=[101, 261]):
+        self.layers = layers
+        self.steps = steps
+
+        super().__init__(device=device, sd_id=sd_id)
+    
+    @torch.no_grad()
+    def __call__(self, img_tensor, prompt, layers=None, steps=None):
+        if layers is None:
+            layers = self.layers
+        if steps is None:
+            steps = self.steps
+        return super().__call__(img_tensor, prompt, layers=layers, steps=steps)
