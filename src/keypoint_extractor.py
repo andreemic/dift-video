@@ -52,7 +52,7 @@ class KeypointExtractor:
 
         perf_manager.start('upsample_features')
         upsampling_to = (initial_h, initial_w)
-        upsampled_features = nn.Upsample(size=upsampling_to, mode='bilinear')(features)
+        upsampled_features = nn.Upsample(size=upsampling_to, mode='bilinear')(features).to(self.device)
         perf_manager.end('upsample_features')
 
         return upsampled_features
@@ -145,10 +145,6 @@ class KeypointExtractor:
         if len(target_feature.shape) == 3:
             target_feature = target_feature.unsqueeze(0)
         
-        perf_manager.start('get_correspondence:move_feature_vectors_to_device')
-        target_feature = target_feature.to(self.device)
-        source_feature = source_feature.to(self.device)
-        perf_manager.end('get_correspondence:move_feature_vectors_to_device')
         
         perf_manager.start('get_correspondence:init_cos_similarity')
         cos = nn.CosineSimilarity(dim=1).to(self.device)
@@ -174,3 +170,4 @@ class KeypointExtractor:
             target_xys.append(max_xy)
         
         return target_xys
+    
