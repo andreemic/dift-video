@@ -12,7 +12,7 @@ class DIFTFeatureExtractor(SDFeaturizer):
         super().__init__(device=device, sd_id=sd_id)
     
     @torch.no_grad()
-    def __call__(self, img_tensor, prompt, layer=None, step=None):
+    def __call__(self, img_tensor, prompt, layer=None, step=None, perf_manager=None):
         if layer is None:
             layer = self.layer
         if step is None:
@@ -20,6 +20,10 @@ class DIFTFeatureExtractor(SDFeaturizer):
 
         results = []
         for i in tqdm(range(len(img_tensor)), desc='Extracting features from images'):
+            if perf_manager:
+                perf_manager.start('extract_features_from_image')
             results.append(super(DIFTFeatureExtractor, self).forward(img_tensor[i], prompt, up_ft_index=layer, t=step))
+            if perf_manager:
+                perf_manager.end('extract_features_from_image')
         
         return torch.stack(results)
