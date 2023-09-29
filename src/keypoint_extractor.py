@@ -11,6 +11,7 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
+import gc
 
 """
 
@@ -27,7 +28,8 @@ class KeypointExtractor:
 
     def __init__(self, device='cuda', sd_id="stabilityai/stable-diffusion-2-1"):
         self.device = device
-        self.feature_extractor = DIFTFeatureExtractor(sd_id, device=device)
+        self.sd_id = sd_id
+        
 
     def img_to_features(self, images: list[Image.Image], prompt: str, verbose=False, layer=1, step=261, perf_manager=MockPerformanceManager) -> torch.Tensor:
         """
@@ -35,6 +37,7 @@ class KeypointExtractor:
         Returns:
             torch.Tensor: feature vector of shape [BS, CH, H, W] (BS is 1 if a single image is passed); H and W are smaller than the original image size by a factor dependent on layer setting
         """
+        self.feature_extractor = DIFTFeatureExtractor(self.sd_id, device=self.device)
         if type(images) != list:
             assert isinstance(images, Image.Image), f"Images must be a list of PIL images or a single PIL image. Received type {type(images)}."
             images = [images]
@@ -48,17 +51,15 @@ class KeypointExtractor:
             print(f'KeypointExtractor.img_to_features(): images_tensors.shape = {images_tensors.shape}')
         
         # out is a tensor of shape [BS, CH, H, W] with features for each image
-        features = self.feature_extractor(images_tensors, prompt=prompt, perf_manager=perf_manager).squeeze(1).to("cpu")
+        features = self.feature_extractor(images_tensors, prompt=prompt, perf_manager=perf_manager).squeeze(1).to(self.device)
 
-        perf_manager.start('upsample_features')
-        upsampling_to = (initial_h, initial_w)
-        upsampled_features = nn.Upsample(size=upsampling_to, mode='bilinear')(features).to(self.device)
-        perf_manager.end('upsample_features')
-
-        return upsampled_features
+        del self.feature_extractor
+        gc.collect()
+        torch.cuda.empty_cache()
+        return features
 
 
-    def track_keypoints(self, frames: list[Image.Image], prompt: str,  source_frame_idx: int=0, grid_size=30, source_frame_keypoints=None, perf_manager=MockPerformanceManager, parallel=False) -> list[list[Keypoint]]:
+    def track_keypoints(self, frames: list[Image.Image], prompt: str,  source_frame_idx: int=0, grid_size=30, source_frame_keypoints=None, perf_manager=MockPerformanceManager, parallel=False, layer=1, timestep=261) -> list[list[Keypoint]]:
         """
         Tracks keypoints (or grid) on the source frame across each frame in the video.
         
@@ -71,7 +72,8 @@ class KeypointExtractor:
         Returns:
             list[list[Keypoint]]: list of keypoint dictionaries for each frame in the video. Each keypoint dictionary has the following keys: x, y, frame, id
         """
-        features = self.img_to_features(frames, prompt=prompt, perf_manager=perf_manager)
+        w, h = frames[0].size
+        features = self.img_to_features(frames, prompt=prompt, perf_manager=perf_manager, layer=layer, step=timestep)
         if source_frame_keypoints is None:
             assert grid_size is not None, "grid_size must be specified if source_frame_keypoints is None"
             source_frame_keypoints = get_grid_keypoints(frames[source_frame_idx].size[0], frames[source_frame_idx].size[1], grid_size=grid_size)
@@ -85,18 +87,31 @@ class KeypointExtractor:
                 continue
             else:
                 perf_manager.start('get_frame_to_frame_correspondence')
+                source_feature = features[source_frame_idx]
+                target_feature = features[i]
+
                 if parallel:
-                    this_frame_keypoints = self.get_keypoints_correspondence_parallel(features[source_frame_idx], features[i], source_frame_keypoints)
+                    this_frame_keypoints = self.get_keypoints_correspondence_parallel(source_feature, target_feature, source_frame_keypoints, upsample_size=(w, h))
                 else:
-                    this_frame_keypoints = self.get_keypoints_correspondence(features[source_frame_idx], features[i], source_frame_keypoints, perf_manager=perf_manager)
+                    this_frame_keypoints = self.get_keypoints_correspondence(source_feature, target_feature, source_frame_keypoints, upsample_size=(w, h), perf_manager=perf_manager)
                 perf_manager.end('get_frame_to_frame_correspondence')
                 keypoints_per_frame.append(this_frame_keypoints)
         
         return keypoints_per_frame
 
 
-    def get_keypoints_correspondence(self, source_feature, target_feature, source_frame_keypoints: list[Keypoint], perf_manager=MockPerformanceManager) -> list[Keypoint]:
+    def get_keypoints_correspondence(self, source_feature, target_feature, source_frame_keypoints: list[Keypoint], upsample_size=None, perf_manager=MockPerformanceManager) -> list[Keypoint]:
         target_keypoints = []
+
+        if upsample_size is not None:
+            perf_manager.start('upsample_features')
+            w, h = upsample_size 
+
+            upsample_layer = nn.Upsample(size=(h, w), mode='bilinear', align_corners=True)  # align_corners=True is often used with 'bilinear' mode.
+            
+            source_feature = upsample_layer(source_feature.unsqueeze(0))[0]
+            target_feature = upsample_layer(target_feature.unsqueeze(0))[0]
+            perf_manager.end('upsample_features')
 
         for source_keypoint in tqdm(source_frame_keypoints, desc="Finding correspondences for keypoints", total=len(source_frame_keypoints), unit='keypoint'):
             source_xy = (source_keypoint['x'], source_keypoint['y'])
@@ -154,7 +169,7 @@ class KeypointExtractor:
         num_channel = source_feature.size(1)
 
         perf_manager.start('get_correspondence:extract_source_vector')
-        source_vector = source_feature[0, :, y, x].view(1, num_channel, 1, 1)  # 1, C, 1, 1
+        source_vector = source_feature[0, :, y, x].view(1, num_channel, 1, 1).to(self.device)  # 1, C, 1, 1
         perf_manager.end('get_correspondence:extract_source_vector')
         
         perf_manager.start('get_correspondence:cos_similarity')
