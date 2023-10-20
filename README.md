@@ -1,6 +1,6 @@
-# dift-video (WIP)
+# dift-video
 
-Simple wrapper to apply SD Feature Extractors to find correspondences in video.
+Simple wrapper to apply DIFT to video keypoint tracking.
 
 Can 
 1. load some frames
