@@ -1,5 +1,14 @@
 # requires path to contain dift/src directory from the original DIFT repo
-from dift_sd import SDFeaturizer
+
+import sys
+import os
+def absolutize_path(relative_path_to_this_file):
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), relative_path_to_this_file))
+
+sys.path.append(absolutize_path('dift/src'))
+
+
+from .dift.src.models.dift_sd import SDFeaturizer
 import torch
 from tqdm import tqdm
 
