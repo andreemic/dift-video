@@ -1,0 +1,3 @@
+[submodule "src/extractors/dift_extractor/dift"]
+	path = src/extractors/dift_extractor/dift
+	url = https://github.com/andreemic/dift.git
