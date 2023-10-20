@@ -1,6 +1,7 @@
 from PIL import Image
 
 import torch 
+import os
 import torch.nn as nn
 # from extractors.joha import SDFeatureExtractor
 from extractors.dift_extractor import DIFTFeatureExtractor
@@ -9,9 +10,11 @@ from performance import PerformanceManager, MockPerformanceManager
 
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
+from feature_cache import FeatureCache
 
 import numpy as np
 import gc
+import concurrent.futures
 
 """
 
@@ -25,10 +28,10 @@ class Keypoint(TypedDict):
 
 
 class KeypointExtractor:
-
     def __init__(self, device='cuda', sd_id="stabilityai/stable-diffusion-2-1"):
         self.device = device
         self.sd_id = sd_id
+        self.feature_cache = FeatureCache(device=device)
         
 
     def img_to_features(self, images: list[Image.Image], prompt: str, verbose=False, layer=1, step=261, perf_manager=MockPerformanceManager) -> torch.Tensor:
@@ -53,13 +56,33 @@ class KeypointExtractor:
         # out is a tensor of shape [BS, CH, H, W] with features for each image
         features = self.feature_extractor(images_tensors, prompt=prompt, perf_manager=perf_manager).squeeze(1).to(self.device)
 
+        # free up gpu memory
         del self.feature_extractor
         gc.collect()
         torch.cuda.empty_cache()
+        
         return features
 
+    
 
-    def track_keypoints(self, frames: list[Image.Image], prompt: str,  source_frame_idx: int=0, grid_size=30, source_frame_keypoints=None, perf_manager=MockPerformanceManager, parallel=False, layer=1, timestep=261) -> list[list[Keypoint]]:
+    def get_cache_path(self, cache_dir:str, video_key: str, layer: int, step: int) -> str:
+        return os.path.join(cache_dir, f'{video_key}_layer{layer}_step{step}')
+
+
+    def track_keypoints(self, 
+        frames: list[Image.Image], 
+        prompt: str,  
+        source_frame_idx: int=0, 
+        grid_size=30, 
+        source_frame_keypoints=None, 
+        perf_manager=MockPerformanceManager, 
+        parallel=False, 
+        verbose=False,
+        layer=1, 
+        timestep=261,
+        cache_dir=None,
+        video_cache_key=None
+        ) -> list[list[Keypoint]]:
         """
         Tracks keypoints (or grid) on the source frame across each frame in the video.
         
@@ -69,11 +92,35 @@ class KeypointExtractor:
             grid_size (int): size of the grid to use for keypoints
             source_frame_keypoints (list[Keypoint]): list of keypoints on the source frame. If None, a grid of keypoints will be generated.
 
+            cache_dir (str): directory to use for caching the feature vectors. If None, no caching will be used.
+            video_cache_key (str): key to use for caching the feature vectors. If None, no caching will be used.
+
         Returns:
             list[list[Keypoint]]: list of keypoint dictionaries for each frame in the video. Each keypoint dictionary has the following keys: x, y, frame, id
         """
         w, h = frames[0].size
-        features = self.img_to_features(frames, prompt=prompt, perf_manager=perf_manager, layer=layer, step=timestep)
+
+        features = None
+        cache_path = None
+        if cache_dir is not None and video_cache_key is not None:
+            cache_path = self.get_cache_path(cache_dir, video_cache_key, layer, timestep)
+
+        if cache_path and os.path.exists(cache_path):
+            perf_manager.start('load_features')
+            print(f'📂 Loading DIFT features from {cache_path}')
+            features = self.feature_cache.load_features(cache_path)
+            perf_manager.end('load_features')
+
+        if features is None:
+            perf_manager.start('extract_features')
+            print(f'⏳ Extracting DIFT features for video {video_cache_key}...')
+            features = self.img_to_features(frames, prompt=prompt, perf_manager=perf_manager, layer=layer, step=timestep)
+            if cache_path:
+                print(f'💾 Saving DIFT features to {cache_path}')
+                self.feature_cache.save_features(features, cache_path)
+            perf_manager.end('extract_features')
+        
+        
         if source_frame_keypoints is None:
             assert grid_size is not None, "grid_size must be specified if source_frame_keypoints is None"
             source_frame_keypoints = get_grid_keypoints(frames[source_frame_idx].size[0], frames[source_frame_idx].size[1], grid_size=grid_size)
@@ -81,7 +128,7 @@ class KeypointExtractor:
         
         keypoints_per_frame = []
 
-        for i, frame in tqdm(enumerate(frames), desc='Tracking keypoints', total=len(frames), unit='frame'):
+        for i, frame in tqdm(enumerate(frames), desc='Tracking keypoints', total=len(frames), unit='frame', disable=not verbose):
             if i == source_frame_idx:
                 keypoints_per_frame.append(source_frame_keypoints)
                 continue
@@ -93,14 +140,14 @@ class KeypointExtractor:
                 if parallel:
                     this_frame_keypoints = self.get_keypoints_correspondence_parallel(source_feature, target_feature, source_frame_keypoints, upsample_size=(w, h))
                 else:
-                    this_frame_keypoints = self.get_keypoints_correspondence(source_feature, target_feature, source_frame_keypoints, upsample_size=(w, h), perf_manager=perf_manager)
+                    this_frame_keypoints = self.get_keypoints_correspondence(source_feature, target_feature, source_frame_keypoints, upsample_size=(w, h), perf_manager=perf_manager, verbose=verbose)
                 perf_manager.end('get_frame_to_frame_correspondence')
                 keypoints_per_frame.append(this_frame_keypoints)
         
         return keypoints_per_frame
 
 
-    def get_keypoints_correspondence(self, source_feature, target_feature, source_frame_keypoints: list[Keypoint], upsample_size=None, perf_manager=MockPerformanceManager) -> list[Keypoint]:
+    def get_keypoints_correspondence(self, source_feature, target_feature, source_frame_keypoints: list[Keypoint], upsample_size=None, perf_manager=MockPerformanceManager, verbose=False) -> list[Keypoint]:
         target_keypoints = []
 
         if upsample_size is not None:
@@ -113,7 +160,7 @@ class KeypointExtractor:
             target_feature = upsample_layer(target_feature.unsqueeze(0))[0]
             perf_manager.end('upsample_features')
 
-        for source_keypoint in tqdm(source_frame_keypoints, desc="Finding correspondences for keypoints", total=len(source_frame_keypoints), unit='keypoint'):
+        for source_keypoint in tqdm(source_frame_keypoints, desc="Finding correspondences for keypoints", total=len(source_frame_keypoints), unit='keypoint', disable=True):
             source_xy = (source_keypoint['x'], source_keypoint['y'])
             target_keypoints_xys = self.get_correspondence(source_feature, target_feature, source_xy, perf_manager=perf_manager)
             target_keypoints.append({
